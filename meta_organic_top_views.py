@@ -25,6 +25,7 @@ BASE = f"https://graph.facebook.com/{GRAPH}"
 TOP_N = 5
 DEFAULT_MAX_SCAN = 500
 _VIEW_WORKERS = 12
+CAPTION_MAX = 2200
 
 
 def _token() -> str:
@@ -70,6 +71,11 @@ def _preview(text: str, max_len: int = 120) -> str:
     if len(s) > max_len:
         return s[: max_len - 1].rstrip() + "…"
     return s
+
+
+def _caption_text(text: str, max_len: int = CAPTION_MAX) -> str:
+    """Keep enough caption to retain end-of-post hashtag blocks."""
+    return (text or "").strip()[:max_len]
 
 
 def _resolve_fj() -> tuple[str, str, str]:
@@ -417,3 +423,119 @@ def fetch_top_organic_by_views(
             "top_n": top_n,
         },
     }
+
+
+def scan_organic_posts(*, max_scan: int = DEFAULT_MAX_SCAN) -> list[dict[str, Any]]:
+    """All scanned FB/IG posts with view counts. Captions/URLs are FJ content, not PHI."""
+    user_tok = _token()
+    page_id, page_token, ig_id = _resolve_fj()
+    paid = _fetch_paid_markers(user_tok or page_token)
+    fb_posts = _list_facebook_posts(page_id, page_token, max_posts=max_scan)
+    ig_media = _list_instagram_media(ig_id, page_token, max_posts=max_scan)
+
+    fb_paid = paid.get("fb_post_ids", set())
+    ig_paid_ids = paid.get("ig_media_ids", set())
+    ig_paid_links = paid.get("ig_permalinks", set())
+
+    out: list[dict[str, Any]] = []
+    fb_items: list[dict[str, Any]] = []
+    for post in fb_posts:
+        pid = str(post.get("id") or "")
+        leaf = pid.split("_")[-1] if pid else ""
+        created = pd.to_datetime(post.get("created_time"), utc=True, errors="coerce")
+        fb_items.append(
+            {
+                "platform": "Facebook",
+                "post_id": pid,
+                "posted_at": created.date() if pd.notna(created) else None,
+                "post_type": str(post.get("status_type") or "post").replace("_", " "),
+                "preview": _caption_text(str(post.get("message") or "")),
+                "url": str(post.get("permalink_url") or ""),
+                "boosted": bool(pid in fb_paid or leaf in fb_paid),
+            }
+        )
+
+    def _fb_fill(item: dict[str, Any]) -> dict[str, Any]:
+        item["views"] = _fb_post_views(item["post_id"], page_token)
+        return item
+
+    with ThreadPoolExecutor(max_workers=_VIEW_WORKERS) as pool:
+        out.extend(pool.map(_fb_fill, fb_items))
+
+    ig_items: list[dict[str, Any]] = []
+    for media in ig_media:
+        mid = str(media.get("id") or "")
+        link = _normalize_permalink(str(media.get("permalink") or ""))
+        created = pd.to_datetime(media.get("timestamp"), utc=True, errors="coerce")
+        ig_items.append(
+            {
+                "platform": "Instagram",
+                "post_id": mid,
+                "posted_at": created.date() if pd.notna(created) else None,
+                "post_type": _ig_type_label(media),
+                "preview": _caption_text(str(media.get("caption") or "")),
+                "url": str(media.get("permalink") or ""),
+                "boosted": bool(mid in ig_paid_ids or link in ig_paid_links),
+            }
+        )
+
+    def _ig_fill(item: dict[str, Any]) -> dict[str, Any]:
+        item["views"] = _ig_media_views(item["post_id"], page_token)
+        return item
+
+    with ThreadPoolExecutor(max_workers=_VIEW_WORKERS) as pool:
+        out.extend(pool.map(_ig_fill, ig_items))
+    return out
+
+
+def _batch_text_field(ids: list[str], token: str, field: str) -> dict[str, str]:
+    """Read one Graph text field per id. Falls back to single-object reads."""
+    out: dict[str, str] = {}
+    clean = [str(i).strip() for i in ids if str(i).strip()]
+    for i in range(0, len(clean), 40):
+        chunk = clean[i : i + 40]
+        try:
+            data = _graph(
+                "",
+                {
+                    "ids": ",".join(chunk),
+                    "fields": field,
+                    "access_token": token,
+                },
+            )
+        except RuntimeError:
+            data = {}
+            for pid in chunk:
+                try:
+                    rec = _graph(pid, {"fields": field, "access_token": token})
+                except RuntimeError:
+                    continue
+                text = rec.get(field) or ""
+                out[str(pid)] = _caption_text(str(text))
+            continue
+        for pid, rec in data.items():
+            if not isinstance(rec, dict):
+                continue
+            text = rec.get(field) or ""
+            out[str(pid)] = _caption_text(str(text))
+    return out
+
+
+def fetch_captions_for_ids(ids: list[str], token: str, *, field: str = "message") -> dict[str, str]:
+    """Batch-read one caption field. Use message for Facebook, caption for Instagram."""
+    return _batch_text_field(ids, token, field)
+
+
+def fetch_feed_captions(*, max_scan: int = 2000) -> dict[tuple[str, str], str]:
+    """Full Facebook message / Instagram caption from the live feeds."""
+    page_id, page_token, ig_id = _resolve_fj()
+    out: dict[tuple[str, str], str] = {}
+    for post in _list_facebook_posts(page_id, page_token, max_posts=max_scan):
+        pid = str(post.get("id") or "").strip()
+        if pid:
+            out[("Facebook", pid)] = _caption_text(str(post.get("message") or ""))
+    for media in _list_instagram_media(ig_id, page_token, max_posts=max_scan):
+        mid = str(media.get("id") or "").strip()
+        if mid:
+            out[("Instagram", mid)] = _caption_text(str(media.get("caption") or ""))
+    return out

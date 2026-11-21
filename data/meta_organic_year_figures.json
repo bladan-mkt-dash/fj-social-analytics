@@ -1,0 +1,80 @@
+{
+  "through": "2026-11-17",
+  "timezone": "America/Los_Angeles",
+  "generated_at": "2026-11-18T05:41:24-08:00",
+  "rows": [
+    {
+      "platform": "Facebook",
+      "metric": "Organic views",
+      "2024": 11811,
+      "2025": 36591,
+      "2026": 35544
+    },
+    {
+      "platform": "Facebook",
+      "metric": "Follower growth",
+      "2024": 16,
+      "2025": 148,
+      "2026": 400
+    },
+    {
+      "platform": "Facebook",
+      "metric": "Organic posts published",
+      "2024": 255,
+      "2025": 104,
+      "2026": 146
+    },
+    {
+      "platform": "Instagram",
+      "metric": "Organic views",
+      "2024": null,
+      "2025": 21983,
+      "2026": 122031
+    },
+    {
+      "platform": "Instagram",
+      "metric": "Follower growth",
+      "2024": 704,
+      "2025": 1466,
+      "2026": 646
+    },
+    {
+      "platform": "Instagram",
+      "metric": "Organic posts published",
+      "2024": 335,
+      "2025": 185,
+      "2026": 160
+    },
+    {
+      "platform": "Facebook + Instagram",
+      "metric": "Organic views",
+      "2024": null,
+      "2025": 58574,
+      "2026": 157575
+    },
+    {
+      "platform": "Facebook + Instagram",
+      "metric": "Follower growth",
+      "2024": 720,
+      "2025": 1614,
+      "2026": 1046
+    },
+    {
+      "platform": "Facebook + Instagram",
+      "metric": "Organic posts published",
+      "2024": 590,
+      "2025": 289,
+      "2026": 306
+    }
+  ],
+  "footnotes": [
+    "Organic views count displays, not unique people. Meta no longer returns a unique organic reach number, and the Reach total in Meta includes ads.",
+    "Facebook organic views are page views that were not from an ad. Months Meta did not record are left out of that year.",
+    "Instagram does not split account views into organic and ads. Organic views are account views minus Instagram ad impressions for the same dates.",
+    "Follower growth is the change in follower count. Facebook uses the Page follows total. Instagram 2024 and 2025 use the tracker\u2019s December counts. Instagram 2026 is follows minus unfollows from January 1 through November 17.",
+    "Organic posts are feed posts, reels, and carousels published in the year that were never used as an ad. Stories are not included.",
+    "2026 is January 1 through November 17. Today is left out.",
+    "Facebook view history has no data for 2024-01, 2024-02, 2024-03, 2024-04, 2024-05, 2024-06, 2024-07. The 2024 organic-views figure is August through December only.",
+    "Instagram account views only go back two years, so 2024 organic views are not available."
+  ]
+}

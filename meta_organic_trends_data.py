@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+
+_HERE = Path(__file__).resolve().parent
+_ROOT = _HERE.parent
 
 TOKEN_PATH = Path.home() / ".config" / "mcp-google-sheets" / "token.json"
 SHEET_TAB = "Monthly Tracker"
@@ -219,7 +223,7 @@ def _load_platform_year(
     return records
 
 
-def load_meta_organic_trends(
+def load_meta_organic_trends_from_sheets(
     *,
     years: tuple[int, ...] = (2023, 2024, 2025, 2026),
 ) -> pd.DataFrame:
@@ -263,6 +267,88 @@ def load_meta_organic_trends(
     today = pd.Timestamp.today().normalize().replace(day=1)
     df = df[df["month"] <= today].copy()
     return df.sort_values(["platform", "month"]).reset_index(drop=True)
+
+
+def _align_open_month_followers(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep the open month's total followers on prior EOM + new follows.
+
+    Live followers_count is today's stock and can sit below the constructed
+    monthly series, which made the chart look like a loss after a gain month.
+    """
+    if df.empty or "followers" not in df.columns or "new_followers" not in df.columns:
+        return df
+    current = pd.Timestamp.today().to_period("M")
+    out = df.copy()
+    for platform in out["platform"].dropna().unique():
+        part = out.loc[out["platform"] == platform].sort_values("month")
+        if len(part) < 2:
+            continue
+        last = part.iloc[-1]
+        if pd.Timestamp(last["month"]).to_period("M") != current:
+            continue
+        prior = part.iloc[-2]["followers"]
+        gained = last["new_followers"]
+        if pd.isna(prior) or pd.isna(gained):
+            continue
+        out.loc[last.name, "followers"] = float(prior) + float(gained)
+    return out
+
+
+def _overlay_sheet_months(warehouse: pd.DataFrame, sheets: pd.DataFrame) -> pd.DataFrame:
+    """Fill warehouse months from the tracker when the sheet has views and the warehouse does not.
+
+    The November 17 refresh is in the sheet. Cloud SQL was not reachable from
+    this machine, so those months are not in the warehouse yet.
+    """
+    if sheets is None or sheets.empty:
+        return warehouse
+    if warehouse is None or warehouse.empty:
+        return sheets
+    out = warehouse.copy()
+    for rec in sheets.to_dict("records"):
+        month = pd.Timestamp(rec.get("month"))
+        platform = rec.get("platform")
+        if pd.isna(month) or not platform:
+            continue
+        sheet_views = rec.get("views")
+        mask = (out["platform"] == platform) & (pd.to_datetime(out["month"]) == month)
+        if not mask.any():
+            out = pd.concat([out, pd.DataFrame([rec])], ignore_index=True)
+            continue
+        if sheet_views is None or pd.isna(sheet_views):
+            continue
+        current = out.loc[mask, "views"]
+        if current.isna().all():
+            for column in METRIC_COLUMNS:
+                out.loc[mask, column] = rec.get(column)
+    return out.sort_values(["platform", "month"]).reset_index(drop=True)
+
+
+def load_meta_organic_trends(
+    *,
+    years: tuple[int, ...] = (2023, 2024, 2025, 2026),
+) -> pd.DataFrame:
+    """PostgreSQL first; Sheets fills months the warehouse does not have yet."""
+    warehouse: pd.DataFrame | None = None
+    try:
+        _arch = _ROOT / "Data & Architecture"
+        if str(_arch) not in sys.path:
+            sys.path.insert(0, str(_arch))
+        from drawer_a_read import organic_trends_from_notebook
+
+        frame = organic_trends_from_notebook()
+        if frame is not None and not frame.empty:
+            warehouse = frame
+    except Exception:
+        # Warehouse miss is fine — tracker sheets are the fallback source.
+        warehouse = None
+    try:
+        sheets = load_meta_organic_trends_from_sheets(years=years)
+    except Exception:
+        sheets = pd.DataFrame()
+    if warehouse is None:
+        return _align_open_month_followers(sheets)
+    return _align_open_month_followers(_overlay_sheet_months(warehouse, sheets))
 
 
 def platform_frame(df: pd.DataFrame, platform: str) -> pd.DataFrame:

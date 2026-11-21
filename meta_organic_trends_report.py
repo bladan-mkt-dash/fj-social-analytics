@@ -18,6 +18,7 @@ Open:
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -38,7 +39,9 @@ if str(_ROOT) not in sys.path:
 load_dotenv(_ROOT / ".env")
 
 from meta_organic_trends_data import load_meta_organic_trends, platform_frame
-from meta_organic_top_views import fetch_top_organic_by_views
+from meta_organic_top_views import _preview, fetch_top_organic_by_views
+from meta_organic_year_figures import load_year_figures
+from organic_hashtags import MIN_USES, hashtag_cloud_figure, hashtag_cloud_table
 
 COLORS = {
     "accent_dark": "#264540",
@@ -46,10 +49,10 @@ COLORS = {
     "views": "#4C78A8",
     "reach": "#F58518",
     "followers": "#54A24B",
-    "interactions": "#E45756",
+    "interactions": "#82A1C2",
     "link_clicks": "#B279A2",
     "visits": "#72B7B2",
-    "new_followers": "#FF9D98",
+    "new_followers": "#54A24B",
     "muted": "#6B7C93",
 }
 
@@ -68,13 +71,43 @@ def _inject_styles() -> None:
     )
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_posts_catalog() -> pd.DataFrame:
+    try:
+        _arch = _ROOT / "Data & Architecture"
+        if str(_arch) not in sys.path:
+            sys.path.insert(0, str(_arch))
+        from drawer_a_read import organic_posts_catalog
+
+        frame = organic_posts_catalog()
+        if frame is not None and not frame.empty:
+            return frame
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_trends() -> pd.DataFrame:
     return load_meta_organic_trends()
 
 
-@st.cache_data(ttl=3600, show_spinner="Scanning organic posts for lifetime views…")
+@st.cache_data(ttl=3600, show_spinner="Loading all-time top organic posts…")
 def _cached_top_views(top_n: int = 5, max_scan: int = 500) -> dict:
+    try:
+        _arch = _ROOT / "Data & Architecture"
+        if str(_arch) not in sys.path:
+            sys.path.insert(0, str(_arch))
+        from drawer_a_read import organic_top_posts_from_notebook
+
+        bundle = organic_top_posts_from_notebook()
+        if bundle and (
+            (isinstance(bundle.get("facebook"), pd.DataFrame) and not bundle["facebook"].empty)
+            or (isinstance(bundle.get("instagram"), pd.DataFrame) and not bundle["instagram"].empty)
+        ):
+            return bundle
+    except Exception:
+        pass
     return fetch_top_organic_by_views(top_n=top_n, max_scan=max_scan)
 
 
@@ -101,6 +134,8 @@ def _render_top_views_table(
         show["Views"] = show["Views"].map(
             lambda v: f"{int(v):,}" if pd.notna(v) else ""
         )
+    if "Preview" in show.columns:
+        show["Preview"] = show["Preview"].map(lambda v: _preview(str(v or "")))
     st.dataframe(
         show,
         use_container_width=True,
@@ -112,7 +147,18 @@ def _render_top_views_table(
     )
 
 
-def _apply_layout(fig: go.Figure, *, title: str) -> go.Figure:
+def _chart_month_ends(df: pd.DataFrame) -> pd.Series:
+    """Place each monthly total on the last calendar day of that month."""
+    return pd.to_datetime(df["month"]) + pd.offsets.MonthEnd(0)
+
+
+def _apply_layout(
+    fig: go.Figure,
+    *,
+    title: str,
+    since: date | None = None,
+    until: date | None = None,
+) -> go.Figure:
     fig.update_layout(
         title=dict(text=title, font=dict(size=18, color=COLORS["accent_dark"])),
         height=440,
@@ -123,18 +169,32 @@ def _apply_layout(fig: go.Figure, *, title: str) -> go.Figure:
         paper_bgcolor=COLORS["page_bg"],
         font=dict(color=COLORS["accent_dark"]),
     )
-    fig.update_xaxes(title_text="Month", showgrid=True, gridcolor="#E6EEF5")
+    fig.update_xaxes(
+        title_text="Month",
+        showgrid=True,
+        gridcolor="#E6EEF5",
+        tickformat="%b %Y",
+        hoverformat="%b %Y",
+    )
+    if since is not None and until is not None:
+        fig.update_xaxes(range=[pd.Timestamp(since), pd.Timestamp(until)])
     return fig
 
 
-def _reach_figure(df: pd.DataFrame, *, title: str) -> go.Figure:
+def _reach_figure(
+    df: pd.DataFrame,
+    *,
+    title: str,
+    since: date | None = None,
+    until: date | None = None,
+) -> go.Figure:
     """Dual-axis: views + reach (left), total followers (right)."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     if df.empty:
         fig.update_layout(title=title)
         return fig
 
-    months = df["month"]
+    months = _chart_month_ends(df)
     fig.add_trace(
         go.Scatter(
             x=months,
@@ -171,7 +231,7 @@ def _reach_figure(df: pd.DataFrame, *, title: str) -> go.Figure:
         ),
         secondary_y=True,
     )
-    _apply_layout(fig, title=title)
+    _apply_layout(fig, title=title, since=since, until=until)
     fig.update_yaxes(
         title_text="Views / reach",
         secondary_y=False,
@@ -188,14 +248,20 @@ def _reach_figure(df: pd.DataFrame, *, title: str) -> go.Figure:
     return fig
 
 
-def _engagement_figure(df: pd.DataFrame, *, title: str) -> go.Figure:
+def _engagement_figure(
+    df: pd.DataFrame,
+    *,
+    title: str,
+    since: date | None = None,
+    until: date | None = None,
+) -> go.Figure:
     """Dual-axis: interactions (left), new followers (right)."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     if df.empty:
         fig.update_layout(title=title)
         return fig
 
-    months = df["month"]
+    months = _chart_month_ends(df)
     if "interactions" in df.columns and not df["interactions"].isna().all():
         fig.add_trace(
             go.Scatter(
@@ -204,7 +270,7 @@ def _engagement_figure(df: pd.DataFrame, *, title: str) -> go.Figure:
                 name="Interactions",
                 mode="lines+markers",
                 line=dict(color=COLORS["interactions"], width=2.5),
-                marker=dict(size=5),
+                marker=dict(size=5, color=COLORS["interactions"]),
                 connectgaps=False,
             ),
             secondary_y=False,
@@ -217,12 +283,12 @@ def _engagement_figure(df: pd.DataFrame, *, title: str) -> go.Figure:
                 name="New followers",
                 mode="lines+markers",
                 line=dict(color=COLORS["new_followers"], width=3),
-                marker=dict(size=6),
+                marker=dict(size=6, color=COLORS["new_followers"]),
                 connectgaps=False,
             ),
             secondary_y=True,
         )
-    _apply_layout(fig, title=title)
+    _apply_layout(fig, title=title, since=since, until=until)
     fig.update_yaxes(
         title_text="Interactions",
         secondary_y=False,
@@ -239,6 +305,69 @@ def _engagement_figure(df: pd.DataFrame, *, title: str) -> go.Figure:
     return fig
 
 
+def _history_bounds(df: pd.DataFrame) -> tuple[date, date]:
+    months = pd.to_datetime(df["month"])
+    start = months.min().to_period("M").to_timestamp().date()
+    end = (months.max().to_period("M").to_timestamp() + pd.offsets.MonthEnd(0)).date()
+    return start, end
+
+
+def _filter_chart_months(df: pd.DataFrame, since: date, until: date) -> pd.DataFrame:
+    """Keep months that overlap the inclusive calendar range."""
+    if df.empty:
+        return df
+    starts = pd.to_datetime(df["month"]).dt.to_period("M").dt.to_timestamp()
+    ends = starts + pd.offsets.MonthEnd(0)
+    mask = (starts.dt.date <= until) & (ends.dt.date >= since)
+    return df.loc[mask].copy()
+
+
+def _render_chart_date_filter(df: pd.DataFrame) -> tuple[date, date]:
+    hist_min, hist_max = _history_bounds(df)
+    if "meta_organic_chart_since" not in st.session_state:
+        st.session_state.meta_organic_chart_since = hist_min
+    if "meta_organic_chart_until" not in st.session_state:
+        st.session_state.meta_organic_chart_until = hist_max
+    st.markdown("**Chart date range**")
+    st.caption(
+        "Zooms the Facebook and Instagram line charts. "
+        "Top 5 posts and hashtag clouds stay all-time and are not affected."
+    )
+    start_col, end_col = st.columns(2)
+    with start_col:
+        since = st.date_input(
+            "Start date",
+            min_value=hist_min,
+            max_value=hist_max,
+            key="meta_organic_chart_since",
+        )
+    with end_col:
+        until = st.date_input(
+            "End date",
+            min_value=hist_min,
+            max_value=hist_max,
+            key="meta_organic_chart_until",
+        )
+    return since, until
+
+
+def _render_hashtag_cloud(stats: pd.DataFrame, *, platform: str) -> None:
+    st.markdown(f"**{platform} hashtag cloud**")
+    st.caption(
+        "Top 30 hashtags by average views on organic posts that used the tag "
+        f"(boosted excluded; used on at least {MIN_USES} posts). "
+        "Type size is that same average — tags that tended to get seen, not the ones used most. "
+        "All-time — not affected by the chart date range."
+    )
+    if stats is None or stats.empty:
+        st.info(f"No hashtags found in organic {platform} captions.")
+        return
+    st.plotly_chart(
+        hashtag_cloud_figure(stats, platform=platform),
+        use_container_width=True,
+    )
+
+
 def _platform_section(
     df: pd.DataFrame,
     *,
@@ -248,15 +377,24 @@ def _platform_section(
     paid_excluded: int,
     scanned: int,
     with_views: int,
+    hashtags: pd.DataFrame,
+    since: date,
+    until: date,
 ) -> None:
     st.subheader(f"{platform} — Five Journeys")
     st.caption(caption)
-    st.plotly_chart(
-        _reach_figure(
-            df, title=f"{platform} organic — views, reach, followers"
-        ),
-        use_container_width=True,
-    )
+    if df.empty:
+        st.info(f"No {platform} monthly rows in this chart date range.")
+    else:
+        st.plotly_chart(
+            _reach_figure(
+                df,
+                title=f"{platform} organic — views, reach, followers",
+                since=since,
+                until=until,
+            ),
+            use_container_width=True,
+        )
     _render_top_views_table(
         top_views,
         platform=platform,
@@ -264,49 +402,115 @@ def _platform_section(
         scanned=scanned,
         with_views=with_views,
     )
-    st.plotly_chart(
-        _engagement_figure(
-            df,
-            title=f"{platform} organic — interactions & new followers",
-        ),
-        use_container_width=True,
-    )
+    if not df.empty:
+        st.plotly_chart(
+            _engagement_figure(
+                df,
+                title=f"{platform} organic — interactions & new followers",
+                since=since,
+                until=until,
+            ),
+            use_container_width=True,
+        )
+    _render_hashtag_cloud(hashtags, platform=platform)
 
 
-def main() -> None:
-    st.set_page_config(
-        page_title="Meta Organic Trends",
-        page_icon="📈",
-        layout="wide",
+def _fmt_count(value: object) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{number:,}"
+
+
+def _fmt_growth(value: object) -> str:
+    if value is None or value == "":
+        return "—"
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    sign = "+" if number > 0 else ""
+    return f"{sign}{number:,}"
+
+
+def _render_organic_year_figures() -> None:
+    st.subheader("Organic performance, separate from ads")
+    st.markdown(
+        "Figures for **2024**, **2025**, and **2026 year to date** "
+        "(January 1 through November 17). "
+        "These leave out ad activity. Meta’s Reach total includes ads, "
+        "and Meta no longer provides a unique organic reach number, "
+        "so the organic total is **views that did not come from ads**."
     )
+    payload = load_year_figures()
+    if not payload:
+        st.info("Organic year figures have not been saved yet.")
+        return
+    rows = payload.get("rows") or []
+    show = []
+    for item in rows:
+        metric = str(item.get("metric") or "")
+        fmt = _fmt_growth if metric == "Follower growth" else _fmt_count
+        show.append(
+            {
+                "Platform": item.get("platform"),
+                "Figure": metric,
+                "2024": fmt(item.get("2024")),
+                "2025": fmt(item.get("2025")),
+                "2026 YTD": fmt(item.get("2026")),
+            }
+        )
+    st.dataframe(pd.DataFrame(show), use_container_width=True, hide_index=True)
+    for note in payload.get("footnotes") or []:
+        st.caption(note)
+
+
+def main(*, standalone: bool = True) -> None:
+    if standalone:
+        st.set_page_config(
+            page_title="Meta Organic Trends",
+            page_icon="📈",
+            layout="wide",
+        )
     _inject_styles()
 
     st.title("Meta organic trends")
     st.caption(
-        "Five Journeys Facebook and Instagram — monthly tracker history "
-        "(2023–present): reach metrics and engagement metrics."
+        "Five Journeys Facebook and Instagram, monthly, through November 17, 2026. "
+        "The Reach and view totals in the charts include ad activity. "
+        "Organic results, with ads removed, are at the bottom of the page."
     )
-    st.link_button(
-        "← Back to Campaign Breakdown",
-        CAMPAIGN_BREAKDOWN_URL,
-        type="secondary",
-    )
+    if standalone:
+        st.link_button(
+            "← Back to Campaign Breakdown",
+            CAMPAIGN_BREAKDOWN_URL,
+            type="secondary",
+        )
 
     with st.spinner("Loading Monthly Tracker history…"):
         try:
             df = _cached_trends()
         except Exception as exc:
-            st.error(f"Could not load tracker sheets.\n\n{exc}")
+            st.error(f"Could not load Meta organic trends.\n\n{exc}")
             st.stop()
 
     if df.empty:
-        st.warning("No Meta organic monthly rows found in the tracker sheets.")
+        st.warning("No Meta organic monthly rows found in PostgreSQL or the tracker sheets.")
         st.stop()
 
     if st.button("Refresh data"):
         _cached_trends.clear()
         _cached_top_views.clear()
+        _cached_posts_catalog.clear()
         st.rerun()
+
+    since, until = _render_chart_date_filter(df)
+    if since > until:
+        st.error("Start date must be on or before end date.")
+        st.stop()
 
     with st.spinner("Loading all-time top organic posts by views…"):
         try:
@@ -326,8 +530,11 @@ def main() -> None:
         fb_top = pd.DataFrame()
     if not isinstance(ig_top, pd.DataFrame):
         ig_top = pd.DataFrame()
-    fb = platform_frame(df, "Facebook")
-    ig = platform_frame(df, "Instagram")
+    fb = _filter_chart_months(platform_frame(df, "Facebook"), since, until)
+    ig = _filter_chart_months(platform_frame(df, "Instagram"), since, until)
+    posts = _cached_posts_catalog()
+    fb_tags = hashtag_cloud_table(posts, "Facebook")
+    ig_tags = hashtag_cloud_table(posts, "Instagram")
 
     _platform_section(
         fb,
@@ -340,6 +547,9 @@ def main() -> None:
         paid_excluded=int(top_meta.get("fb_paid_excluded") or 0),
         scanned=int(top_meta.get("fb_scanned") or 0),
         with_views=int(top_meta.get("fb_with_views") or 0),
+        hashtags=fb_tags,
+        since=since,
+        until=until,
     )
     _platform_section(
         ig,
@@ -349,17 +559,25 @@ def main() -> None:
         paid_excluded=int(top_meta.get("ig_paid_excluded") or 0),
         scanned=int(top_meta.get("ig_scanned") or 0),
         with_views=int(top_meta.get("ig_with_views") or 0),
+        hashtags=ig_tags,
+        since=since,
+        until=until,
     )
 
     with st.expander("Data table"):
         show = df.copy()
         show["month"] = show["month"].dt.strftime("%Y-%m")
+        st.caption("Full monthly history. Chart date range does not filter this table.")
         st.dataframe(show, use_container_width=True, hide_index=True)
 
+    _render_organic_year_figures()
+
     st.caption(
-        "Source: Digital Cross-Channel Tracker → Monthly Tracker "
-        "(2023 sheet + 2024–2026 trackers). Total followers are end-of-month counts; "
-        "other series are monthly totals."
+        "Monthly charts: PostgreSQL Drawer A (nightly from the Digital Cross-Channel "
+        "Tracker, 2023–2026) and the Meta Graph API. "
+        "Total followers are end-of-month counts; other series are monthly totals. "
+        "Those Reach and view totals include ad activity. "
+        "The organic table above removes ads and runs through November 17, 2026."
     )
 
 
